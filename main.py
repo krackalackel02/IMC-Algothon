@@ -6,16 +6,15 @@ def close_all_positions(bot):
     for product, pos in positions.items():
         if pos == 0:
             continue
-        # Get the latest orderbook to find the best price
         ob = bot.get_orderbook(product)
-        if pos > 0 and ob.sell_orders:
-            # Sell to flatten long
-            price = ob.sell_orders[0].price
+        if pos > 0 and ob.buy_orders:
+            # Sell to flatten long at best bid (cross the spread)
+            price = ob.buy_orders[0].price
             print(f"Closing long {pos} {product} at {price}")
             bot.send_order(OrderRequest(product, price, Side.SELL, abs(pos)))
-        elif pos < 0 and ob.buy_orders:
-            # Buy to flatten short
-            price = ob.buy_orders[0].price
+        elif pos < 0 and ob.sell_orders:
+            # Buy to flatten short at best ask (cross the spread)
+            price = ob.sell_orders[0].price
             print(f"Closing short {abs(pos)} {product} at {price}")
             bot.send_order(OrderRequest(product, price, Side.BUY, abs(pos)))
     print("All positions close orders sent.")
@@ -138,6 +137,43 @@ class BotGUI:
         self.running = True
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # Instrument filter checkboxes
+        self.instrument_vars = {}
+        self.instruments_frame = tk.Frame(self.root)
+        self.instruments_frame.pack(pady=5)
+        tk.Label(self.instruments_frame, text="Trade Instruments:").pack(side=tk.LEFT)
+        self.root.after(100, self.populate_instrument_checkboxes)
+
+        # Button frame
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(pady=5)
+
+        self.resume_btn = tk.Button(btn_frame, text="Resume Trading", command=self.resume_trading)
+        self.resume_btn.grid(row=0, column=0, padx=5)
+
+        self.pause_btn = tk.Button(btn_frame, text="Pause Trading", command=self.pause_trading)
+        self.pause_btn.grid(row=0, column=1, padx=5)
+
+        self.cancel_btn = tk.Button(btn_frame, text="Cancel All Orders", command=self.cancel_all_orders)
+        self.cancel_btn.grid(row=0, column=2, padx=5)
+
+        self.close_positions_btn = tk.Button(btn_frame, text="Close All Positions", command=self.close_all_positions)
+        self.close_positions_btn.grid(row=0, column=3, padx=5)
+
+    def populate_instrument_checkboxes(self):
+        if not self.bot:
+            self.root.after(100, self.populate_instrument_checkboxes)
+            return
+        products = self.bot.get_products()
+        for p in products:
+            var = tk.BooleanVar(value=True)
+            cb = tk.Checkbutton(self.instruments_frame, text=p.symbol, variable=var)
+            cb.pack(side=tk.LEFT)
+            self.instrument_vars[p.symbol] = var
+
+    def get_selected_instruments(self):
+        return [sym for sym, var in self.instrument_vars.items() if var.get()]
+
     def log(self, msg):
         self.log_queue.put(msg)
 
@@ -164,6 +200,34 @@ class BotGUI:
     def run(self):
         self.update_log()
         self.root.mainloop()
+
+    def pause_trading(self):
+        if self.bot:
+            self.log("Pausing trading loop...")
+            self.running = False
+            self.bot.stop()
+
+    def resume_trading(self):
+        if self.bot:
+            self.log("Resuming trading loop...")
+            self.running = True
+            t = threading.Thread(target=self.bot.run_loop, kwargs={"width":5, "volume":5, "interval":5}, daemon=True)
+            t.start()
+
+    def cancel_all_orders(self):
+        if self.bot:
+            self.log("Cancelling all orders...")
+            self.bot.cancel_all_orders()
+            self.log("All orders cancelled.")
+
+    def close_all_positions(self):
+        if self.bot:
+            self.log("Closing all positions...")
+            try:
+                close_all_positions(self.bot)
+                self.log("All positions close orders sent.")
+            except Exception as e:
+                self.log(f"Error closing positions: {e}")
 
 class GUIMarketBot(WeatherQuoterBot):
     def __init__(self, *args, gui=None, **kwargs):
@@ -194,7 +258,11 @@ class GUIMarketBot(WeatherQuoterBot):
                     self.gui.log(msg)
                 else:
                     print(msg)
+            # Only trade selected instruments
+            selected = self.gui.get_selected_instruments() if self.gui else list(products.keys())
             for symbol, product in products.items():
+                if symbol not in selected:
+                    continue
                 ob = self.get_orderbook(symbol)
                 bids = [o.price for o in ob.buy_orders if o.volume - o.own_volume > 0]
                 asks = [o.price for o in ob.sell_orders if o.volume - o.own_volume > 0]
